@@ -1,0 +1,20 @@
+build
+!.vscode/*
+# Build outputs
+/build/
+
+# Manual development backups
+/backups/
+backup_before_*/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
+Thumbs.db
+
+medusa_firmware_backup.txt
+
+.vscode/
