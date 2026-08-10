@@ -1,11 +1,12 @@
-# Medusa Firmware
+# RP_Pico_SSD1322
 
-RP2040 firmware for the AIMS Medusa eDNA sampler.
+A basic hardware and graphics engine for SSD1322. Requires Pico SDK only (no external dependencies).
 
-The firmware is being developed around a 256×64 SSD1322 OLED display and provides the display, graphics, user input, and hardware interface layers required for the Medusa control system.
+Capable of drawing shapes, graphics, and font in two sizes.
 
-> This project is currently under active development.
+Developed by Yandong Jiang during an internship at the [Australian Institute of Marine Science](https://www.aims.gov.au/).
 
+> This repository is still under active development.
 ## Current Status
 
 Implemented so far:
