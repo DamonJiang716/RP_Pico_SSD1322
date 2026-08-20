@@ -2,10 +2,12 @@
 #include "board_config.hpp"
 
 #include "pico/stdlib.h"
+#include "hardware/dma.h"
 #include "hardware/spi.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 
 namespace
 {
@@ -50,11 +52,314 @@ constexpr uint8_t SSD1322_CMD_COMMAND_LOCK            = 0xFD;
 
 
 // ============================================================
+// Runtime SPI/DMA transaction queue
+// ============================================================
+
+// A full-frame update is represented by exactly six ordered
+// transactions: column command/parameters, row command/parameters,
+// write-RAM command, and the framebuffer payload.
+constexpr std::size_t transaction_queue_capacity = 6;
+constexpr std::size_t inline_data_capacity = 2;
+
+enum class TransferState
+{
+    Idle,
+    DmaActive,
+    WaitingForSpiIdle
+};
+
+struct SpiTransaction
+{
+    bool data_mode = false;
+    bool owns_data = false;
+    const uint8_t* external_data = nullptr;
+    std::size_t length = 0;
+    uint8_t inline_data[inline_data_capacity] = {};
+};
+
+SpiTransaction transaction_queue[
+    transaction_queue_capacity] = {};
+
+std::size_t transaction_head = 0;
+std::size_t transaction_tail = 0;
+std::size_t transaction_count = 0;
+
+TransferState transfer_state =
+    TransferState::Idle;
+
+int tx_dma_channel = -1;
+int rx_dma_channel = -1;
+
+// Every received SPI byte is written to this fixed location. The RX
+// DMA write address does not increment, so the SPI RX FIFO is drained
+// without allocating a second framebuffer-sized buffer.
+volatile uint8_t rx_discard = 0;
+
+bool frame_request_active = false;
+
+
+bool dma_channels_available()
+{
+    return tx_dma_channel >= 0 &&
+           rx_dma_channel >= 0;
+}
+
+
+bool async_busy_internal()
+{
+    return frame_request_active ||
+           transaction_count != 0 ||
+           transfer_state != TransferState::Idle;
+}
+
+
+void clear_transaction_queue()
+{
+    transaction_head = 0;
+    transaction_tail = 0;
+    transaction_count = 0;
+    transfer_state = TransferState::Idle;
+    frame_request_active = false;
+}
+
+
+void initialise_dma_channels()
+{
+    if (dma_channels_available())
+    {
+        return;
+    }
+
+    const int claimed_tx_channel =
+        dma_claim_unused_channel(false);
+
+    if (claimed_tx_channel < 0)
+    {
+        return;
+    }
+
+    const int claimed_rx_channel =
+        dma_claim_unused_channel(false);
+
+    if (claimed_rx_channel < 0)
+    {
+        dma_channel_unclaim(
+            static_cast<uint>(
+                claimed_tx_channel));
+        return;
+    }
+
+    tx_dma_channel = claimed_tx_channel;
+    rx_dma_channel = claimed_rx_channel;
+}
+
+
+bool enqueue_inline_transaction(
+    bool data_mode,
+    const uint8_t* data,
+    std::size_t length)
+{
+    if (data == nullptr ||
+        length == 0 ||
+        length > inline_data_capacity ||
+        transaction_count >=
+            transaction_queue_capacity)
+    {
+        return false;
+    }
+
+    SpiTransaction& transaction =
+        transaction_queue[transaction_tail];
+
+    transaction.data_mode = data_mode;
+    transaction.owns_data = true;
+    transaction.external_data = nullptr;
+    transaction.length = length;
+
+    for (std::size_t index = 0;
+         index < length;
+         ++index)
+    {
+        transaction.inline_data[index] =
+            data[index];
+    }
+
+    transaction_tail =
+        (transaction_tail + 1) %
+        transaction_queue_capacity;
+    ++transaction_count;
+    return true;
+}
+
+
+bool enqueue_external_transaction(
+    bool data_mode,
+    const uint8_t* data,
+    std::size_t length)
+{
+    if (data == nullptr ||
+        length == 0 ||
+        transaction_count >=
+            transaction_queue_capacity)
+    {
+        return false;
+    }
+
+    SpiTransaction& transaction =
+        transaction_queue[transaction_tail];
+
+    transaction.data_mode = data_mode;
+    transaction.owns_data = false;
+    transaction.external_data = data;
+    transaction.length = length;
+
+    transaction_tail =
+        (transaction_tail + 1) %
+        transaction_queue_capacity;
+    ++transaction_count;
+    return true;
+}
+
+
+const uint8_t* transaction_data(
+    const SpiTransaction& transaction)
+{
+    return transaction.owns_data ?
+        transaction.inline_data :
+        transaction.external_data;
+}
+
+
+bool start_next_transaction()
+{
+    if (transfer_state != TransferState::Idle ||
+        transaction_count == 0 ||
+        !dma_channels_available())
+    {
+        return false;
+    }
+
+    const SpiTransaction& transaction =
+        transaction_queue[transaction_head];
+
+    const uint8_t* data =
+        transaction_data(transaction);
+
+    if (data == nullptr ||
+        transaction.length == 0)
+    {
+        return false;
+    }
+
+    const uint tx_channel =
+        static_cast<uint>(tx_dma_channel);
+    const uint rx_channel =
+        static_cast<uint>(rx_dma_channel);
+
+    dma_channel_config tx_config =
+        dma_channel_get_default_config(
+            tx_channel);
+    channel_config_set_transfer_data_size(
+        &tx_config,
+        DMA_SIZE_8);
+    channel_config_set_read_increment(
+        &tx_config,
+        true);
+    channel_config_set_write_increment(
+        &tx_config,
+        false);
+    channel_config_set_dreq(
+        &tx_config,
+        spi_get_dreq(board::oled_spi, true));
+
+    dma_channel_config rx_config =
+        dma_channel_get_default_config(
+            rx_channel);
+    channel_config_set_transfer_data_size(
+        &rx_config,
+        DMA_SIZE_8);
+    channel_config_set_read_increment(
+        &rx_config,
+        false);
+    channel_config_set_write_increment(
+        &rx_config,
+        false);
+    channel_config_set_dreq(
+        &rx_config,
+        spi_get_dreq(board::oled_spi, false));
+
+    volatile uint32_t* const spi_data_register =
+        &spi_get_hw(board::oled_spi)->dr;
+
+    const uint32_t transfer_count =
+        static_cast<uint32_t>(
+            transaction.length);
+
+    // A paired RX DMA owns every byte received by this transaction.
+    // Defensively discard any stale FIFO contents left by earlier
+    // blocking startup traffic before arming the exact-length RX DMA.
+    // The RP2040 SPI FIFO is eight entries deep, so this bounded loop
+    // never waits for hardware.
+    for (uint entry = 0;
+         entry < 8 &&
+             spi_is_readable(board::oled_spi);
+         ++entry)
+    {
+        (void)spi_get_hw(board::oled_spi)->dr;
+    }
+
+    spi_get_hw(board::oled_spi)->icr =
+        SPI_SSPICR_RORIC_BITS;
+
+    // Configure both channels without triggering either one. RX is
+    // armed before TX and both channels are then started together, so
+    // every byte clocked into the full-duplex SPI RX FIFO is discarded.
+    dma_channel_configure(
+        rx_channel,
+        &rx_config,
+        &rx_discard,
+        spi_data_register,
+        transfer_count,
+        false);
+
+    dma_channel_configure(
+        tx_channel,
+        &tx_config,
+        spi_data_register,
+        data,
+        transfer_count,
+        false);
+
+    // D/C is stable before CS is asserted. No code may change either
+    // pin until service() has observed both DMA channels and SPI idle.
+    gpio_put(
+        board::oled_dc_pin,
+        transaction.data_mode ? 1 : 0);
+    gpio_put(board::oled_cs_pin, 0);
+
+    transfer_state = TransferState::DmaActive;
+
+    dma_start_channel_mask(
+        (1u << tx_channel) |
+        (1u << rx_channel));
+
+    return true;
+}
+
+
+// ============================================================
 // Low-level transfer helpers
 // ============================================================
 
 void ssd1322_write_command(uint8_t command)
 {
+    // Blocking helpers are retained for startup configuration and
+    // legacy tests. They must never alter CS or D/C during DMA.
+    if (async_busy_internal())
+    {
+        return;
+    }
+
     // D/C# LOW: the following byte is a command.
     gpio_put(board::oled_dc_pin, 0);
 
@@ -71,6 +376,11 @@ void ssd1322_write_command(uint8_t command)
 
 void ssd1322_write_data(uint8_t data)
 {
+    if (async_busy_internal())
+    {
+        return;
+    }
+
     // D/C# HIGH: the following byte is data or a command parameter.
     gpio_put(board::oled_dc_pin, 1);
 
@@ -85,7 +395,9 @@ void ssd1322_write_data(uint8_t data)
 void ssd1322_write_data_buffer(const uint8_t* data, std::size_t length)
 {
     // Ignore an empty or invalid buffer.
-    if (data == nullptr || length == 0)
+    if (data == nullptr ||
+        length == 0 ||
+        async_busy_internal())
     {
         return;
     }
@@ -134,11 +446,21 @@ void initialise_hardware()
     gpio_init(board::oled_dc_pin);
     gpio_set_dir(board::oled_dc_pin, GPIO_OUT);
     gpio_put(board::oled_dc_pin, 0);
+
+    // Claim a paired TX/RX DMA channel set for runtime frame updates.
+    // If channels are unavailable, blocking startup remains usable and
+    // request_full_frame() reports failure to the caller.
+    initialise_dma_channels();
 }
 
 
 bool initialise_display()
 {
+    if (async_busy_internal())
+    {
+        return false;
+    }
+
     ssd1322_hardware_reset();
 
     // FD 12 — unlock commands.
@@ -296,7 +618,8 @@ bool write_full_frame(
     std::size_t length)
 {
     if (framebuffer == nullptr ||
-        length != framebuffer_size)
+        length != framebuffer_size ||
+        async_busy_internal())
     {
         return false;
     }
@@ -309,6 +632,159 @@ bool write_full_frame(
         length);
 
     return true;
+}
+
+
+bool request_full_frame(
+    const uint8_t* framebuffer,
+    std::size_t length)
+{
+    if (framebuffer == nullptr ||
+        length != framebuffer_size ||
+        !dma_channels_available() ||
+        async_busy_internal())
+    {
+        return false;
+    }
+
+    constexpr uint8_t column_command[] = {
+        SSD1322_CMD_SET_COLUMN_ADDRESS
+    };
+    constexpr uint8_t column_parameters[] = {
+        0x1C, 0x5B
+    };
+    constexpr uint8_t row_command[] = {
+        SSD1322_CMD_SET_ROW_ADDRESS
+    };
+    constexpr uint8_t row_parameters[] = {
+        0x00, 0x3F
+    };
+    constexpr uint8_t write_ram_command[] = {
+        SSD1322_CMD_WRITE_RAM
+    };
+
+    // Small command and parameter bytes are copied into queue-owned
+    // storage. Only the long-lived framebuffer is referenced directly.
+    const bool queued =
+        enqueue_inline_transaction(
+            false,
+            column_command,
+            sizeof(column_command)) &&
+        enqueue_inline_transaction(
+            true,
+            column_parameters,
+            sizeof(column_parameters)) &&
+        enqueue_inline_transaction(
+            false,
+            row_command,
+            sizeof(row_command)) &&
+        enqueue_inline_transaction(
+            true,
+            row_parameters,
+            sizeof(row_parameters)) &&
+        enqueue_inline_transaction(
+            false,
+            write_ram_command,
+            sizeof(write_ram_command)) &&
+        enqueue_external_transaction(
+            true,
+            framebuffer,
+            length);
+
+    if (!queued)
+    {
+        clear_transaction_queue();
+        return false;
+    }
+
+    frame_request_active = true;
+
+    if (!start_next_transaction())
+    {
+        clear_transaction_queue();
+        return false;
+    }
+
+    std::printf("OLED DMA START\n");
+    return true;
+}
+
+
+void service()
+{
+    if (transfer_state == TransferState::Idle)
+    {
+        if (transaction_count != 0)
+        {
+            start_next_transaction();
+        }
+
+        return;
+    }
+
+    if (transfer_state == TransferState::DmaActive)
+    {
+        const uint tx_channel =
+            static_cast<uint>(tx_dma_channel);
+        const uint rx_channel =
+            static_cast<uint>(rx_dma_channel);
+
+        if (dma_channel_is_busy(tx_channel) ||
+            dma_channel_is_busy(rx_channel))
+        {
+            return;
+        }
+
+        // DMA has consumed the source bytes, but the SPI FIFO may still
+        // be shifting the final byte. Do not release CS yet.
+        __compiler_memory_barrier();
+        transfer_state =
+            TransferState::WaitingForSpiIdle;
+    }
+
+    if (transfer_state ==
+            TransferState::WaitingForSpiIdle &&
+        spi_is_busy(board::oled_spi))
+    {
+        return;
+    }
+
+    if (transfer_state !=
+        TransferState::WaitingForSpiIdle)
+    {
+        return;
+    }
+
+    // Both DMA channels are complete and the last SPI bit is now on the
+    // wire. Only at this point may CS return HIGH and the queue advance.
+    gpio_put(board::oled_cs_pin, 1);
+
+    transaction_head =
+        (transaction_head + 1) %
+        transaction_queue_capacity;
+    --transaction_count;
+    transfer_state = TransferState::Idle;
+
+    if (transaction_count != 0)
+    {
+        start_next_transaction();
+        return;
+    }
+
+    const bool completed_frame =
+        frame_request_active;
+    frame_request_active = false;
+
+    if (completed_frame)
+    {
+        std::printf("OLED DMA COMPLETE\n");
+    }
+}
+
+
+bool busy()
+{
+    return async_busy_internal();
 }
 
 

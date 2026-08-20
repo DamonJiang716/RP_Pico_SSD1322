@@ -61,6 +61,7 @@ target_include_directories(medusa_firmware PRIVATE
 # Add any user requested libraries
 target_link_libraries(medusa_firmware 
         hardware_spi
+        hardware_dma
         )
 
 pico_add_extra_outputs(medusa_firmware)
@@ -148,7 +149,8 @@ pico_enable_stdio_usb(medusa_renderer_oled_test 1)
 
 target_link_libraries(medusa_renderer_oled_test
         pico_stdlib
-        hardware_spi)
+        hardware_spi
+        hardware_dma)
 
 target_include_directories(medusa_renderer_oled_test PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/include
@@ -168,7 +170,8 @@ pico_enable_stdio_usb(medusa_display_button_test 1)
 
 target_link_libraries(medusa_display_button_test
         pico_stdlib
-        hardware_spi)
+        hardware_spi
+        hardware_dma)
 
 target_include_directories(medusa_display_button_test PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/include
@@ -206,7 +209,8 @@ pico_enable_stdio_usb(medusa_sprite_oled_test 1)
 
 target_link_libraries(medusa_sprite_oled_test
         pico_stdlib
-        hardware_spi)
+        hardware_spi
+        hardware_dma)
 
 target_include_directories(medusa_sprite_oled_test PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/include
@@ -229,7 +233,8 @@ pico_enable_stdio_usb(medusa_settings_ui_input_test 1)
 
 target_link_libraries(medusa_settings_ui_input_test
         pico_stdlib
-        hardware_spi)
+        hardware_spi
+        hardware_dma)
 
 target_include_directories(medusa_settings_ui_input_test PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/include

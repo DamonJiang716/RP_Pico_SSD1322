@@ -3482,6 +3482,9 @@ bool render_current_page(const UiState& ui)
 
 void refresh_display(const UiState& ui)
 {
+    // The caller guarantees that DMA is idle before touching the single
+    // framebuffer. Once accepted, request_full_frame() owns its contents
+    // until ssd1322::busy() becomes false.
     framebuffer::clear(black);
 
     if (!render_current_page(ui))
@@ -3490,7 +3493,7 @@ void refresh_display(const UiState& ui)
             "Medusa Full UI rendering failed");
     }
 
-    if (!ssd1322::write_full_frame(
+    if (!ssd1322::request_full_frame(
             framebuffer::data(),
             framebuffer::data_size()))
     {
@@ -3559,9 +3562,14 @@ int main()
 
     RotaryState rotary_state;
     UiState ui;
+    bool display_refresh_pending = false;
 
     while (true)
     {
+        // This performs only quick DMA/SPI state transitions. Input and
+        // mock-state processing continue while a frame is transmitted.
+        ssd1322::service();
+
         const std::uint64_t now_us =
             time_us_64();
         const std::uint32_t gpio_snapshot =
@@ -3608,10 +3616,19 @@ int main()
             update_mock_data(ui, now_us) ||
             ui_dirty;
 
-        if (ui_dirty &&
-            ui.current_mode_valid)
+        // Coalesce any number of UI changes while DMA owns the single
+        // framebuffer. Render only the newest logical state after the
+        // previous frame has fully left SPI and CS is HIGH again.
+        display_refresh_pending =
+            display_refresh_pending ||
+            ui_dirty;
+
+        if (display_refresh_pending &&
+            ui.current_mode_valid &&
+            !ssd1322::busy())
         {
             refresh_display(ui);
+            display_refresh_pending = false;
         }
 
         sleep_ms(input_poll_time_ms);

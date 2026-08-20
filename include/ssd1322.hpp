@@ -28,6 +28,21 @@ bool write_full_frame(
     const uint8_t* framebuffer,
     std::size_t length);
 
+// Schedule a full-frame runtime update and return immediately.
+// The framebuffer must remain valid and unchanged until busy()
+// becomes false.
+bool request_full_frame(
+    const uint8_t* framebuffer,
+    std::size_t length);
+
+// Advance the non-blocking SPI/DMA state machine. This function
+// never waits for DMA or SPI hardware and should be called often.
+void service();
+
+// True from the moment a frame request is accepted until the final
+// SPI bit has left the peripheral and CS has returned HIGH.
+bool busy();
+
 void ssd1322_hardware_reset();
 void ssd1322_set_column_address(uint8_t start, uint8_t end);
 void ssd1322_set_row_address(uint8_t start, uint8_t end);
