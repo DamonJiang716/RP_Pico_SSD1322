@@ -1,0 +1,1143 @@
+diff --git a/src/main.cpp b/src/main.cpp
+index 04e01c7..a01308b 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -102,16 +102,32 @@ enum class SettingsItem
+     AdjustClock,
+     SamplingSpeed,
+     DefaultVolumes,
+-    DisplaySettings
++    DisplaySettings,
++    DisablePumps
+ };
+ 
++constexpr SettingsItem settings_menu_items[] = {
++    SettingsItem::AdjustClock,
++    SettingsItem::SamplingSpeed,
++    SettingsItem::DefaultVolumes,
++    SettingsItem::DisplaySettings,
++    SettingsItem::DisablePumps
++};
++
++constexpr std::size_t settings_menu_item_count =
++    sizeof(settings_menu_items) /
++    sizeof(settings_menu_items[0]);
++
++static_assert(settings_menu_item_count == 5);
++
+ enum class SettingsView
+ {
+     Menu,
+     AdjustClock,
+     SamplingSpeed,
+     DefaultVolumes,
+-    DisplaySettings
++    DisplaySettings,
++    DisablePumps
+ };
+ 
+ enum class CalibrateState
+@@ -229,12 +245,11 @@ struct SettingsData
+     unsigned int demo_hour = 14;
+     unsigned int demo_minute = 35;
+ 
+-    unsigned int pump_speed[pump_count] = {
+-        50, 50, 50, 50
+-    };
++    unsigned int sampling_speed = 50;
++    unsigned int default_volume_ml = 500;
+ 
+-    unsigned int default_volume_ml[pump_count] = {
+-        500, 500, 500, 500
++    bool pump_enabled[pump_count] = {
++        true, true, true, true
+     };
+ 
+     unsigned int display_level = 10;
+@@ -256,8 +271,7 @@ struct CalibrateData
+ struct PrimeData
+ {
+     PrimeState state = PrimeState::Setup;
+-    std::size_t edit_pump = 0;
+-    unsigned int target_volume_ml[pump_count] = {};
++    unsigned int target_volume_ml = 500;
+ 
+     // Prototype mock current volumes. Future values will come from
+     // AVR-to-RP2040 UART messages.
+@@ -271,8 +285,7 @@ struct SampleData
+     SampleState state = SampleState::Setup;
+     SampleStartType start_type =
+         SampleStartType::Immediate;
+-    std::size_t edit_pump = 0;
+-    unsigned int target_volume_ml[pump_count] = {};
++    unsigned int target_volume_ml = 500;
+ 
+     // Prototype mock current volumes. Future values will come from
+     // AVR-to-RP2040 UART messages.
+@@ -656,6 +669,8 @@ const char* settings_item_name(
+         return "Default volumes";
+     case SettingsItem::DisplaySettings:
+         return "Display settings";
++    case SettingsItem::DisablePumps:
++        return "Disable pumps";
+     }
+ 
+     return "Unknown";
+@@ -672,19 +687,6 @@ void clear_pump_values(
+     }
+ }
+ 
+-void copy_default_volumes(
+-    unsigned int destination[pump_count],
+-    const SettingsData& settings)
+-{
+-    for (std::size_t pump = 0;
+-         pump < pump_count;
+-         ++pump)
+-    {
+-        destination[pump] =
+-            settings.default_volume_ml[pump];
+-    }
+-}
+-
+ void leave_current_mode(UiState& ui)
+ {
+     if (!ui.current_mode_valid)
+@@ -742,10 +744,8 @@ void enter_default_mode_page(
+         break;
+     case Mode::Prime:
+         ui.prime.state = PrimeState::Setup;
+-        ui.prime.edit_pump = 0;
+-        copy_default_volumes(
+-            ui.prime.target_volume_ml,
+-            ui.settings);
++        ui.prime.target_volume_ml =
++            ui.settings.default_volume_ml;
+         clear_pump_values(
+             ui.prime.current_volume_ml);
+         ui.prime.last_update_us = 0;
+@@ -755,10 +755,8 @@ void enter_default_mode_page(
+         ui.sample.state = SampleState::Setup;
+         ui.sample.start_type =
+             SampleStartType::Immediate;
+-        ui.sample.edit_pump = 0;
+-        copy_default_volumes(
+-            ui.sample.target_volume_ml,
+-            ui.settings);
++        ui.sample.target_volume_ml =
++            ui.settings.default_volume_ml;
+         clear_pump_values(
+             ui.sample.current_volume_ml);
+         ui.sample.state_started_us = 0;
+@@ -846,40 +844,42 @@ bool decrease_value(
+     return true;
+ }
+ 
+-SettingsItem previous_settings_item(
++std::size_t settings_item_index(
+     SettingsItem item)
+ {
+-    switch (item)
++    for (std::size_t index = 0;
++         index < settings_menu_item_count;
++         ++index)
+     {
+-    case SettingsItem::AdjustClock:
+-        return SettingsItem::DisplaySettings;
+-    case SettingsItem::SamplingSpeed:
+-        return SettingsItem::AdjustClock;
+-    case SettingsItem::DefaultVolumes:
+-        return SettingsItem::SamplingSpeed;
+-    case SettingsItem::DisplaySettings:
+-        return SettingsItem::DefaultVolumes;
++        if (settings_menu_items[index] == item)
++        {
++            return index;
++        }
+     }
+ 
+-    return SettingsItem::AdjustClock;
++    return 0;
++}
++
++SettingsItem previous_settings_item(
++    SettingsItem item)
++{
++    const std::size_t index =
++        settings_item_index(item);
++
++    return settings_menu_items[
++        index == 0 ?
++            settings_menu_item_count - 1 :
++            index - 1];
+ }
+ 
+ SettingsItem next_settings_item(
+     SettingsItem item)
+ {
+-    switch (item)
+-    {
+-    case SettingsItem::AdjustClock:
+-        return SettingsItem::SamplingSpeed;
+-    case SettingsItem::SamplingSpeed:
+-        return SettingsItem::DefaultVolumes;
+-    case SettingsItem::DefaultVolumes:
+-        return SettingsItem::DisplaySettings;
+-    case SettingsItem::DisplaySettings:
+-        return SettingsItem::AdjustClock;
+-    }
++    const std::size_t index =
++        settings_item_index(item);
+ 
+-    return SettingsItem::AdjustClock;
++    return settings_menu_items[
++        (index + 1) % settings_menu_item_count];
+ }
+ 
+ SettingsView settings_view_for_item(
+@@ -895,6 +895,8 @@ SettingsView settings_view_for_item(
+         return SettingsView::DefaultVolumes;
+     case SettingsItem::DisplaySettings:
+         return SettingsView::DisplaySettings;
++    case SettingsItem::DisablePumps:
++        return SettingsView::DisablePumps;
+     }
+ 
+     return SettingsView::Menu;
+@@ -944,21 +946,39 @@ bool update_settings(
+ 
+     if (events.enter_pressed)
+     {
++        bool return_to_menu = false;
++
+         if (settings.view ==
+-            SettingsView::DisplaySettings)
++            SettingsView::AdjustClock)
+         {
+-            settings.view = SettingsView::Menu;
++            if (settings.edit_field == 0)
++            {
++                ++settings.edit_field;
++            }
++            else
++            {
++                return_to_menu = true;
++            }
+         }
+-        else if (settings.edit_field + 1 <
+-                 (settings.view ==
+-                      SettingsView::AdjustClock ?
+-                      2u :
+-                      static_cast<unsigned int>(
+-                          pump_count)))
++        else if (settings.view ==
++                 SettingsView::DisablePumps)
+         {
+-            ++settings.edit_field;
++            if (settings.edit_field + 1 <
++                pump_count)
++            {
++                ++settings.edit_field;
++            }
++            else
++            {
++                return_to_menu = true;
++            }
+         }
+         else
++        {
++            return_to_menu = true;
++        }
++
++        if (return_to_menu)
+         {
+             settings.view = SettingsView::Menu;
+             settings.edit_field = 0;
+@@ -1002,8 +1022,7 @@ bool update_settings(
+              SettingsView::SamplingSpeed)
+     {
+         unsigned int& value =
+-            settings.pump_speed[
+-                settings.edit_field];
++            settings.sampling_speed;
+ 
+         changed = events.up_pressed ?
+             increase_value(value, 5, 100) :
+@@ -1012,9 +1031,7 @@ bool update_settings(
+         if (changed)
+         {
+             std::printf(
+-                "Pump %u speed: %u%%\n",
+-                static_cast<unsigned int>(
+-                    settings.edit_field + 1),
++                "Sampling speed: %u%%\n",
+                 value);
+         }
+     }
+@@ -1022,8 +1039,7 @@ bool update_settings(
+              SettingsView::DefaultVolumes)
+     {
+         unsigned int& value =
+-            settings.default_volume_ml[
+-                settings.edit_field];
++            settings.default_volume_ml;
+ 
+         changed = events.up_pressed ?
+             increase_value(value, 50, 2000) :
+@@ -1032,13 +1048,12 @@ bool update_settings(
+         if (changed)
+         {
+             std::printf(
+-                "Pump %u default volume: %u mL\n",
+-                static_cast<unsigned int>(
+-                    settings.edit_field + 1),
++                "Default volume: %u mL\n",
+                 value);
+         }
+     }
+-    else
++    else if (settings.view ==
++             SettingsView::DisplaySettings)
+     {
+         changed = events.up_pressed ?
+             increase_value(
+@@ -1057,6 +1072,21 @@ bool update_settings(
+                 settings.display_level);
+         }
+     }
++    else if (settings.view ==
++             SettingsView::DisablePumps)
++    {
++        bool& enabled =
++            settings.pump_enabled[
++                settings.edit_field];
++        enabled = !enabled;
++        changed = true;
++
++        std::printf(
++            "Pump %u: %s\n",
++            static_cast<unsigned int>(
++                settings.edit_field + 1),
++            enabled ? "ENABLED" : "DISABLED");
++    }
+ 
+     return changed;
+ }
+@@ -1201,20 +1231,12 @@ bool update_prime(
+     {
+         if (events.enter_pressed)
+         {
+-            if (data.edit_pump + 1 < pump_count)
+-            {
+-                ++data.edit_pump;
+-            }
+-            else
+-            {
+-                data.edit_pump = 0;
+-                clear_pump_values(
+-                    data.current_volume_ml);
+-                data.state = PrimeState::Running;
+-                data.last_update_us = now_us;
+-                data.serial_tick_count = 0;
+-                std::printf("Prime state: RUNNING\n");
+-            }
++            clear_pump_values(
++                data.current_volume_ml);
++            data.state = PrimeState::Running;
++            data.last_update_us = now_us;
++            data.serial_tick_count = 0;
++            std::printf("Prime state: RUNNING\n");
+ 
+             return true;
+         }
+@@ -1225,13 +1247,15 @@ bool update_prime(
+             return false;
+         }
+ 
+-        unsigned int& value =
+-            data.target_volume_ml[
+-                data.edit_pump];
+-
+         return events.up_pressed ?
+-            increase_value(value, 50, 2000) :
+-            decrease_value(value, 50, 50);
++            increase_value(
++                data.target_volume_ml,
++                50,
++                2000) :
++            decrease_value(
++                data.target_volume_ml,
++                50,
++                50);
+     }
+ 
+     if (data.state == PrimeState::Running &&
+@@ -1247,7 +1271,6 @@ bool update_prime(
+         events.enter_pressed)
+     {
+         data.state = PrimeState::Setup;
+-        data.edit_pump = 0;
+         clear_pump_values(
+             data.current_volume_ml);
+         return true;
+@@ -1299,15 +1322,7 @@ bool update_sample(
+     {
+         if (events.enter_pressed)
+         {
+-            if (data.edit_pump + 1 < pump_count)
+-            {
+-                ++data.edit_pump;
+-            }
+-            else
+-            {
+-                data.edit_pump = 0;
+-                data.state = SampleState::StartType;
+-            }
++            data.state = SampleState::StartType;
+ 
+             return true;
+         }
+@@ -1318,13 +1333,15 @@ bool update_sample(
+             return false;
+         }
+ 
+-        unsigned int& value =
+-            data.target_volume_ml[
+-                data.edit_pump];
+-
+         return events.up_pressed ?
+-            increase_value(value, 50, 2000) :
+-            decrease_value(value, 50, 50);
++            increase_value(
++                data.target_volume_ml,
++                50,
++                2000) :
++            decrease_value(
++                data.target_volume_ml,
++                50,
++                50);
+     }
+ 
+     if (data.state == SampleState::StartType)
+@@ -1385,7 +1402,6 @@ bool update_sample(
+         events.enter_pressed)
+     {
+         data.state = SampleState::Setup;
+-        data.edit_pump = 0;
+         clear_pump_values(
+             data.current_volume_ml);
+         return true;
+@@ -1538,15 +1554,17 @@ bool update_current_mode(
+     return false;
+ }
+ 
+-bool all_pumps_reached_target(
++bool all_enabled_pumps_reached_target(
+     const unsigned int current[pump_count],
+-    const unsigned int target[pump_count])
++    unsigned int target,
++    const bool enabled[pump_count])
+ {
+     for (std::size_t pump = 0;
+          pump < pump_count;
+          ++pump)
+     {
+-        if (current[pump] < target[pump])
++        if (enabled[pump] &&
++            current[pump] < target)
+         {
+             return false;
+         }
+@@ -1557,7 +1575,8 @@ bool all_pumps_reached_target(
+ 
+ bool advance_mock_pump_volumes(
+     unsigned int current[pump_count],
+-    const unsigned int target[pump_count],
++    unsigned int target,
++    const bool enabled[pump_count],
+     const unsigned int increments[pump_count],
+     std::uint64_t tick_count)
+ {
+@@ -1567,7 +1586,8 @@ bool advance_mock_pump_volumes(
+          pump < pump_count;
+          ++pump)
+     {
+-        if (current[pump] >= target[pump])
++        if (!enabled[pump] ||
++            current[pump] >= target)
+         {
+             continue;
+         }
+@@ -1583,8 +1603,8 @@ bool advance_mock_pump_volumes(
+             advance;
+ 
+         current[pump] =
+-            new_volume >= target[pump] ?
+-                target[pump] :
++            new_volume >= target ?
++                target :
+                 static_cast<unsigned int>(
+                     new_volume);
+ 
+@@ -1658,6 +1678,7 @@ bool update_prime_mock(
+         advance_mock_pump_volumes(
+             data.current_volume_ml,
+             data.target_volume_ml,
++            ui.settings.pump_enabled,
+             increments,
+             tick_count);
+ 
+@@ -1670,9 +1691,10 @@ bool update_prime_mock(
+         data.serial_tick_count %= 4;
+     }
+ 
+-    if (all_pumps_reached_target(
++    if (all_enabled_pumps_reached_target(
+             data.current_volume_ml,
+-            data.target_volume_ml))
++            data.target_volume_ml,
++            ui.settings.pump_enabled))
+     {
+         data.state = PrimeState::Complete;
+         std::printf("Prime state: COMPLETE\n");
+@@ -1728,6 +1750,7 @@ bool update_sample_mock(
+         advance_mock_pump_volumes(
+             data.current_volume_ml,
+             data.target_volume_ml,
++            ui.settings.pump_enabled,
+             increments,
+             tick_count);
+ 
+@@ -1740,9 +1763,10 @@ bool update_sample_mock(
+         data.serial_tick_count %= 4;
+     }
+ 
+-    if (all_pumps_reached_target(
++    if (all_enabled_pumps_reached_target(
+             data.current_volume_ml,
+-            data.target_volume_ml))
++            data.target_volume_ml,
++            ui.settings.pump_enabled))
+     {
+         data.state = SampleState::Complete;
+         std::printf("Sample state: COMPLETE\n");
+@@ -2067,12 +2091,11 @@ bool draw_duration(
+         background);
+ }
+ 
+-bool draw_percentage_right(
++bool draw_centered_percentage(
+     unsigned int percentage,
+-    std::int32_t right_edge,
+     std::int32_t y,
+-    std::uint8_t foreground,
+-    std::uint8_t background)
++    std::uint8_t foreground = bright,
++    std::uint8_t background = black)
+ {
+     char digits[4];
+ 
+@@ -2089,26 +2112,49 @@ bool draw_percentage_right(
+         return false;
+     }
+ 
+-    const std::int32_t digit_width =
+-        written * glyph_width;
++    const std::int32_t total_width =
++        (written + 1) * glyph_width;
+     const std::int32_t x =
+-        right_edge - digit_width - glyph_width;
++        (static_cast<std::int32_t>(
++             framebuffer::width) -
++         total_width) /
++        2;
+ 
+-    if (!graphics::draw_text(
+-            x,
+-            y,
+-            digits,
+-            foreground,
+-            background))
+-    {
+-        return false;
+-    }
++    return graphics::draw_text(
++               x,
++               y,
++               digits,
++               foreground,
++               background) &&
++           draw_percent_cell(
++               x + written * glyph_width,
++               y,
++               foreground,
++               background);
++}
++
++bool draw_centered_volume(
++    unsigned int volume_ml,
++    std::int32_t y,
++    std::uint8_t foreground = bright,
++    std::uint8_t background = black)
++{
++    char volume_text[8];
+ 
+-    return draw_percent_cell(
+-        x + digit_width,
+-        y,
+-        foreground,
+-        background);
++    const int written = std::snprintf(
++        volume_text,
++        sizeof(volume_text),
++        "%u mL",
++        volume_ml);
++
++    return format_succeeded(
++               written,
++               sizeof(volume_text)) &&
++           draw_centered_text(
++               y,
++               volume_text,
++               foreground,
++               background);
+ }
+ 
+ bool draw_fraction_right(
+@@ -2302,26 +2348,24 @@ bool draw_selection_row(
+ 
+ bool render_settings_menu(const UiState& ui)
+ {
+-    constexpr SettingsItem items[] = {
+-        SettingsItem::AdjustClock,
+-        SettingsItem::SamplingSpeed,
+-        SettingsItem::DefaultVolumes,
+-        SettingsItem::DisplaySettings
+-    };
+-
+     constexpr std::int32_t rows[] = {
+-        15, 27, 39, 51
++        14, 24, 34, 44, 54
+     };
+ 
++    static_assert(
++        sizeof(rows) / sizeof(rows[0]) ==
++        settings_menu_item_count);
++
+     for (std::size_t index = 0;
+-         index < pump_count;
++         index < settings_menu_item_count;
+          ++index)
+     {
+         if (!draw_selection_row(
+                 rows[index],
+-                settings_item_name(items[index]),
++                settings_item_name(
++                    settings_menu_items[index]),
+                 ui.settings.selected_item ==
+-                    items[index]))
++                    settings_menu_items[index]))
+         {
+             return false;
+         }
+@@ -2409,137 +2453,63 @@ bool render_adjust_clock(const UiState& ui)
+         ui.settings.edit_field == 1);
+ }
+ 
+-bool render_pump_speed_row(
+-    std::size_t pump,
+-    unsigned int speed,
+-    std::int32_t text_y,
+-    bool selected)
++bool render_sampling_speed(const UiState& ui)
+ {
+-    const std::uint8_t background =
+-        selected ? highlight : black;
+-    const std::uint8_t foreground =
+-        selected ? black : bright;
+-
+-    if (!graphics::fill_rectangle(
+-            56,
+-            text_y - 1,
+-            144,
+-            10,
+-            background))
++    if (!draw_centered_text(
++            17,
++            "SAMPLING SPEED"))
+     {
+         return false;
+     }
+ 
+-    char pump_text[3];
+-
+-    const int written = std::snprintf(
+-        pump_text,
+-        sizeof(pump_text),
+-        "P%u",
+-        static_cast<unsigned int>(pump + 1));
+-
+-    if (!format_succeeded(
+-            written,
+-            sizeof(pump_text)) ||
+-        !graphics::draw_text(
++    if (!graphics::fill_rectangle(
+             72,
+-            text_y,
+-            pump_text,
+-            foreground,
+-            background))
++            35,
++            112,
++            14,
++            highlight))
+     {
+         return false;
+     }
+ 
+-    return draw_percentage_right(
+-        speed,
+-        184,
+-        text_y,
+-        foreground,
+-        background);
++    return draw_centered_percentage(
++        ui.settings.sampling_speed,
++        38,
++        black,
++        highlight);
+ }
+ 
+-bool render_sampling_speed(const UiState& ui)
++bool render_default_volumes(const UiState& ui)
+ {
+     if (!draw_centered_text(
+-            14,
+-            "SAMPLING SPEED"))
++            17,
++            "DEFAULT VOLUME"))
+     {
+         return false;
+     }
+ 
+-    constexpr std::int32_t rows[pump_count] = {
+-        24, 34, 44, 54
+-    };
+-
+-    for (std::size_t pump = 0;
+-         pump < pump_count;
+-         ++pump)
+-    {
+-        if (!render_pump_speed_row(
+-                pump,
+-                ui.settings.pump_speed[pump],
+-                rows[pump],
+-                ui.settings.edit_field == pump))
+-        {
+-            return false;
+-        }
+-    }
+-
+-    return true;
+-}
+-
+-bool render_pump_volume_row(
+-    std::size_t pump,
+-    unsigned int volume_ml,
+-    std::int32_t text_y,
+-    bool selected,
+-    std::int32_t left = 40,
+-    std::int32_t width = 176)
+-{
+-    const std::uint8_t background =
+-        selected ? highlight : black;
+-    const std::uint8_t foreground =
+-        selected ? black : bright;
+-
+     if (!graphics::fill_rectangle(
+-            left,
+-            text_y - 1,
+-            width,
+-            10,
+-            background))
+-    {
+-        return false;
+-    }
+-
+-    char value_text[13];
+-
+-    const int written = std::snprintf(
+-        value_text,
+-        sizeof(value_text),
+-        "P%u %u mL",
+-        static_cast<unsigned int>(pump + 1),
+-        volume_ml);
+-
+-    if (!format_succeeded(
+-            written,
+-            sizeof(value_text)))
++            72,
++            35,
++            112,
++            14,
++            highlight))
+     {
+         return false;
+     }
+ 
+-    return draw_centered_text(
+-        text_y,
+-        value_text,
+-        foreground,
+-        background);
++    return draw_centered_volume(
++        ui.settings.default_volume_ml,
++        38,
++        black,
++        highlight);
+ }
+ 
+-bool render_default_volumes(const UiState& ui)
++bool render_disable_pumps(const UiState& ui)
+ {
+     if (!draw_centered_text(
+             14,
+-            "DEFAULT VOLUMES"))
++            "DISABLE PUMPS"))
+     {
+         return false;
+     }
+@@ -2552,10 +2522,22 @@ bool render_default_volumes(const UiState& ui)
+          pump < pump_count;
+          ++pump)
+     {
+-        if (!render_pump_volume_row(
+-                pump,
+-                ui.settings.default_volume_ml[pump],
++        char pump_text[7];
++
++        const int written = std::snprintf(
++            pump_text,
++            sizeof(pump_text),
++            "P%u %s",
++            static_cast<unsigned int>(pump + 1),
++            ui.settings.pump_enabled[pump] ?
++                "ON" : "OFF");
++
++        if (!format_succeeded(
++                written,
++                sizeof(pump_text)) ||
++            !draw_selection_row(
+                 rows[pump],
++                pump_text,
+                 ui.settings.edit_field == pump))
+         {
+             return false;
+@@ -2619,6 +2601,8 @@ bool render_settings(const UiState& ui)
+         return render_default_volumes(ui);
+     case SettingsView::DisplaySettings:
+         return render_display_settings(ui);
++    case SettingsView::DisablePumps:
++        return render_disable_pumps(ui);
+     }
+ 
+     return false;
+@@ -2818,43 +2802,37 @@ bool render_calibrate(const UiState& ui)
+         black);
+ }
+ 
+-bool render_pump_setup(
+-    const char* title,
+-    const unsigned int target[pump_count],
+-    std::size_t selected_pump)
++bool render_shared_volume_setup(
++    unsigned int target_volume_ml)
+ {
+-    if (!draw_centered_text(14, title))
++    if (!draw_centered_text(17, "SETUP") ||
++        !draw_centered_text(31, "VOLUME"))
+     {
+         return false;
+     }
+ 
+-    constexpr std::int32_t rows[pump_count] = {
+-        24, 34, 44, 54
+-    };
+-
+-    for (std::size_t pump = 0;
+-         pump < pump_count;
+-         ++pump)
++    if (!graphics::fill_rectangle(
++            72,
++            44,
++            112,
++            12,
++            highlight))
+     {
+-        if (!render_pump_volume_row(
+-                pump,
+-                target[pump],
+-                rows[pump],
+-                pump == selected_pump,
+-                4,
+-                248))
+-        {
+-            return false;
+-        }
++        return false;
+     }
+ 
+-    return true;
++    return draw_centered_volume(
++        target_volume_ml,
++        46,
++        black,
++        highlight);
+ }
+ 
+ bool render_pump_fraction_screen(
+     const char* title,
+     const unsigned int current[pump_count],
+-    const unsigned int target[pump_count])
++    unsigned int target,
++    const bool enabled[pump_count])
+ {
+     if (!draw_centered_text(14, title))
+     {
+@@ -2885,12 +2863,28 @@ bool render_pump_fraction_screen(
+                 rows[pump],
+                 pump_text,
+                 bright,
+-                black) ||
+-            !draw_fraction_right(
+-                current[pump],
+-                target[pump],
+-                208,
+-                rows[pump]))
++                black))
++        {
++            return false;
++        }
++
++        if (enabled[pump])
++        {
++            if (!draw_fraction_right(
++                    current[pump],
++                    target,
++                    208,
++                    rows[pump]))
++            {
++                return false;
++            }
++        }
++        else if (!graphics::draw_text(
++                     184,
++                     rows[pump],
++                     "OFF",
++                     bright,
++                     black))
+         {
+             return false;
+         }
+@@ -2901,7 +2895,8 @@ bool render_pump_fraction_screen(
+ 
+ bool render_pump_values_screen(
+     const char* title,
+-    const unsigned int current[pump_count])
++    const unsigned int current[pump_count],
++    const bool enabled[pump_count])
+ {
+     if (!draw_centered_text(14, title))
+     {
+@@ -2916,14 +2911,20 @@ bool render_pump_values_screen(
+          pump < pump_count;
+          ++pump)
+     {
+-        char value_text[9];
+-
+-        const int written = std::snprintf(
+-            value_text,
+-            sizeof(value_text),
+-            "P%u %u",
+-            static_cast<unsigned int>(pump + 1),
+-            current[pump]);
++        char value_text[12];
++
++        const int written = enabled[pump] ?
++            std::snprintf(
++                value_text,
++                sizeof(value_text),
++                "P%u %u mL",
++                static_cast<unsigned int>(pump + 1),
++                current[pump]) :
++            std::snprintf(
++                value_text,
++                sizeof(value_text),
++                "P%u OFF",
++                static_cast<unsigned int>(pump + 1));
+ 
+         if (!format_succeeded(
+                 written,
+@@ -2946,23 +2947,24 @@ bool render_prime(const UiState& ui)
+     switch (data.state)
+     {
+     case PrimeState::Setup:
+-        return render_pump_setup(
+-            "SETUP",
+-            data.target_volume_ml,
+-            data.edit_pump);
++        return render_shared_volume_setup(
++            data.target_volume_ml);
+     case PrimeState::Running:
+         return render_pump_fraction_screen(
+             "RUNNING",
+             data.current_volume_ml,
+-            data.target_volume_ml);
++            data.target_volume_ml,
++            ui.settings.pump_enabled);
+     case PrimeState::Complete:
+         return render_pump_values_screen(
+             "COMPLETE",
+-            data.current_volume_ml);
++            data.current_volume_ml,
++            ui.settings.pump_enabled);
+     case PrimeState::Stopped:
+         return render_pump_values_screen(
+             "STOPPED",
+-            data.current_volume_ml);
++            data.current_volume_ml,
++            ui.settings.pump_enabled);
+     }
+ 
+     return false;
+@@ -3013,10 +3015,55 @@ bool render_sample_delay(const UiState& ui)
+            draw_centered_text(49, "WAITING");
+ }
+ 
+-bool render_sample_ready()
++bool render_sample_ready(const UiState& ui)
+ {
++    char enabled_pumps[12] = {};
++    std::size_t used = 0;
++
++    for (std::size_t pump = 0;
++         pump < pump_count;
++         ++pump)
++    {
++        if (!ui.settings.pump_enabled[pump])
++        {
++            continue;
++        }
++
++        const std::size_t remaining =
++            sizeof(enabled_pumps) - used;
++        const int written = std::snprintf(
++            enabled_pumps + used,
++            remaining,
++            used == 0 ? "P%u" : " P%u",
++            static_cast<unsigned int>(pump + 1));
++
++        if (!format_succeeded(
++                written,
++                remaining))
++        {
++            return false;
++        }
++
++        used += static_cast<std::size_t>(written);
++    }
++
++    if (used == 0)
++    {
++        const int written = std::snprintf(
++            enabled_pumps,
++            sizeof(enabled_pumps),
++            "NO PUMPS");
++
++        if (!format_succeeded(
++                written,
++                sizeof(enabled_pumps)))
++        {
++            return false;
++        }
++    }
++
+     return draw_centered_text(22, "READY") &&
+-           draw_centered_text(42, "P1 P2 P3 P4");
++           draw_centered_text(42, enabled_pumps);
+ }
+ 
+ bool render_sample_running(const UiState& ui)
+@@ -3050,8 +3097,27 @@ bool render_sample_running(const UiState& ui)
+                 rows[pump],
+                 pump_text,
+                 bright,
+-                black) ||
+-            !graphics::draw_rectangle(
++                black))
++        {
++            return false;
++        }
++
++        if (!ui.settings.pump_enabled[pump])
++        {
++            if (!graphics::draw_text(
++                    228,
++                    rows[pump],
++                    "OFF",
++                    bright,
++                    black))
++            {
++                return false;
++            }
++
++            continue;
++        }
++
++        if (!graphics::draw_rectangle(
+                 24,
+                 rows[pump] + 1,
+                 144,
+@@ -3062,7 +3128,7 @@ bool render_sample_running(const UiState& ui)
+         }
+ 
+         const unsigned int target =
+-            ui.sample.target_volume_ml[pump];
++            ui.sample.target_volume_ml;
+         const unsigned int current =
+             ui.sample.current_volume_ml[pump];
+ 
+@@ -3109,26 +3175,26 @@ bool render_sample(const UiState& ui)
+     switch (data.state)
+     {
+     case SampleState::Setup:
+-        return render_pump_setup(
+-            "SETUP",
+-            data.target_volume_ml,
+-            data.edit_pump);
++        return render_shared_volume_setup(
++            data.target_volume_ml);
+     case SampleState::StartType:
+         return render_sample_start_type(ui);
+     case SampleState::DelayWaiting:
+         return render_sample_delay(ui);
+     case SampleState::Ready:
+-        return render_sample_ready();
++        return render_sample_ready(ui);
+     case SampleState::Running:
+         return render_sample_running(ui);
+     case SampleState::Complete:
+         return render_pump_values_screen(
+             "COMPLETE",
+-            data.current_volume_ml);
++            data.current_volume_ml,
++            ui.settings.pump_enabled);
+     case SampleState::Stopped:
+         return render_pump_values_screen(
+             "STOPPED",
+-            data.current_volume_ml);
++            data.current_volume_ml,
++            ui.settings.pump_enabled);
+     }
+ 
+     return false;
